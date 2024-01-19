@@ -43,6 +43,10 @@ enum Ops {
     JmpIfNeZero(usize),
     // optimized commands
     ZeroOut,
+    AddToRight,
+    AddToLeft,
+    SubFromLeft,
+    SubFromRight,
 }
 
 fn count_matches(chr: char, lexer: &mut Lexer) -> usize {
@@ -87,21 +91,118 @@ fn parse_code() -> Vec<Ops> {
     ops
 }
 
-fn optimize(ops: &mut Vec<Ops>) {
-    for i in (0..ops.len()).rev() {
-        if ops.len() - i >= 3 {
-            // optimize set to zero
-            let mut last_ops = ops[i..i + 3].iter();
-            if matches!(last_ops.next(), Some(Ops::JmpIfZero(_))) // [
-                && matches!(last_ops.next(), Some(Ops::Add(1)) | Some(Ops::Sub(1)))  // + or -
-                && matches!(last_ops.next(), Some(Ops::JmpIfNeZero(_))) { // ]
-                ops[i] = Ops::ZeroOut;
-                ops.remove(i + 1);
-                ops.remove(i + 1);
-                continue;
-            }
+fn sum_chain<'a, I>(ops: &mut I) -> (isize, usize)
+        where I: Iterator<Item = &'a Ops> {
+    match ops.next() {
+        Some(Ops::Add(num)) => {
+            let res = sum_chain(ops); 
+            (res.0 + *num as isize, res.1 + 1)
+        },
+        Some(Ops::Sub(num)) => {
+            let res = sum_chain(ops);
+            (res.0 - *num as isize, res.1 + 1)
+        },
+        _ => (0, 1),
+    }
+}
+
+fn optimization_add_sub(ops: &mut Vec<Ops>, i: usize) -> usize {
+    let mut last_ops = ops[i..].iter();
+    let (sum, count) = sum_chain(&mut last_ops);
+    if count >= 2 {
+        if sum > 0 {
+            ops[i] = Ops::Add((sum % 256) as u8);
+        } else if sum < 0 {
+            ops[i] = Ops::Sub((-sum % 256) as u8);
+        }
+        repeat(0).take(count - 1).for_each(|_| { ops.remove(i + 1); });
+
+        if sum == 0 {
+            ops.remove(i);
+            return count;
+        } else {
+            return count - 1;
         }
     }
+    0
+}
+
+macro_rules! match_chain {
+    ($left:expr, $($right:pat),+) => {
+        (
+            {
+                let mut last_ops = $left.iter();
+                $(matches!(last_ops.next(), Some($right)) && )* true
+            }
+        )
+    };
+}
+
+
+fn optimization_set_to_zero(ops: &mut Vec<Ops>, i: usize) -> usize {
+    use Ops::*;
+    if match_chain!(ops[i..], JmpIfZero(_), Add(1), JmpIfNeZero(_)) 
+        || match_chain!(ops[i..], JmpIfZero(_), Sub(1), JmpIfNeZero(_)) {
+        ops[i] = ZeroOut;
+        ops.remove(i + 1);
+        ops.remove(i + 1);
+        return 1;
+    }
+    0
+}
+
+macro_rules! add_sub_fns {
+    ($name:ident, $one:pat, $mov:pat, $two:pat, $mov2:pat, $replacement:expr) => {
+        fn $name(ops: &mut Vec<Ops>, i: usize) -> usize {
+            use Ops::*;
+            if match_chain!(ops[i..], JmpIfZero(_), $one, $mov, $two, $mov2, JmpIfNeZero(_))
+                    || match_chain!(ops[i..], JmpIfZero(_), $mov, $two, $mov2, $one, JmpIfNeZero(_)) {
+                ops[i] = $replacement;
+                for _ in 0..5 {
+                    ops.remove(i + 1);
+                }
+                return 1;
+            }
+            0
+        }
+    };
+}
+add_sub_fns!(optimization_add_to_right, Sub(1), Right(1), Add(1), Left(1), AddToRight);
+add_sub_fns!(optimization_add_to_left, Sub(1), Left(1), Add(1), Right(1), AddToLeft);
+add_sub_fns!(optimization_sub_from_left, Sub(1), Left(1), Sub(1), Right(1), SubFromLeft);
+add_sub_fns!(optimization_sub_from_right, Sub(1), Right(1), Sub(1), Left(1), SubFromRight);
+
+macro_rules! add_to_total {
+    ($count_name:ident, $optimization:expr) => {
+        let a = $optimization;
+        if a > 0 {
+            $count_name += a;
+            continue;
+        }
+    };
+}
+
+fn optimize(ops: &mut Vec<Ops>) {
+    let mut set_to_zero = 0;
+    let mut add_sub = 0;
+    let mut add_to_right = 0;
+    let mut add_to_left = 0;
+    let mut sub_from_right = 0;
+    let mut sub_from_left = 0;
+    for i in (0..ops.len()).rev() {
+        add_to_total!(add_sub, optimization_add_sub(ops, i));
+        add_to_total!(set_to_zero, optimization_set_to_zero(ops, i));
+        add_to_total!(add_to_right, optimization_add_to_right(ops, i));
+        add_to_total!(add_to_left, optimization_add_to_left(ops, i));
+        add_to_total!(sub_from_right, optimization_sub_from_right(ops, i));
+        add_to_total!(sub_from_left, optimization_sub_from_left(ops, i));
+    }
+    println!("optimized: removed/comnined {} add/sub commands", add_sub);
+    println!("optimized: created {} set to zero commands", set_to_zero);
+    println!("optimized: created {} add to right commands", add_to_right);
+    println!("optimized: created {} add to left commands", add_to_left);
+    println!("optimized: created {} sub from right commands", sub_from_right);
+    println!("optimized: created {} sub from left commands", sub_from_left);
 }
 
 fn link_jumps(ops: &mut Vec<Ops>) {
@@ -110,11 +211,11 @@ fn link_jumps(ops: &mut Vec<Ops>) {
         let op = ops.get_mut(i).expect("jump linker out of bounds");
         match op {
             Ops::JmpIfZero(_) => callstack.push(i),
-            Ops::JmpIfNeZero(val) => {
-                let index = callstack.pop().expect("Linker did not find unmatched closing bracket");
-                *val = index;
-                if let Some(Ops::JmpIfZero(val)) = ops.get_mut(i) {
-                    *val = i;
+            Ops::JmpIfNeZero(closed_val) => {
+                let open_index = callstack.pop().expect("Linker did not find unmatched closing bracket");
+                *closed_val = open_index;
+                if let Some(Ops::JmpIfZero(open_val)) = ops.get_mut(open_index) {
+                    *open_val = i;
                 }
             },
             _ => (),
@@ -174,6 +275,40 @@ fn interpret(ops: &Vec<Ops>) {
                 instruction = *num;
             },
             Ops::ZeroOut => memory[head] = 0,
+            Ops::AddToRight => {
+                let val = memory[head];
+                if head + 1 == memory.len() {
+                    memory.push_back(0);
+                }
+                memory[head + 1] = memory[head + 1].wrapping_add(val);
+                memory[head] = 0;
+            },
+            Ops::AddToLeft => {
+                let val = memory[head];
+                if head == 0 {
+                    memory.push_front(0);
+                    head = 1;
+                }
+                memory[head - 1] = memory[head + 1].wrapping_add(val);
+                memory[head] = 0;
+            },
+            Ops::SubFromRight => {
+                let val = memory[head];
+                if head + 1 == memory.len() {
+                    memory.push_back(0);
+                }
+                memory[head + 1] = memory[head + 1].wrapping_sub(val);
+                memory[head] = 0;
+            },
+            Ops::SubFromLeft => {
+                let val = memory[head];
+                if head == 0 {
+                    memory.push_front(0);
+                    head = 1;
+                }
+                memory[head - 1] = memory[head + 1].wrapping_sub(val);
+                memory[head] = 0;
+            },
         }
         instruction += 1;
     }
