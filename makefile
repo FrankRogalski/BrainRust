@@ -1,2 +1,2 @@
 main:
-	cargo run
+	cargo run --release ~/Downloads/mandelbrot.b
