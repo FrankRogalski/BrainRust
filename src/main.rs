@@ -3,7 +3,8 @@ use std::fs;
 use std::str::Chars;
 use std::collections::VecDeque;
 use std::iter::{repeat, Iterator};
-use std::io::{stdout, stdin, Write, Read};
+use std::io::{stdout, stdin, Write, Read, Bytes, Stdin, IsTerminal};
+use console::Term;
 
 struct Lexer<'a> {
     bf_code: Chars<'a>,
@@ -47,6 +48,8 @@ enum Ops {
     AddToLeft,
     SubFromLeft,
     SubFromRight,
+    MulRight(usize),
+    MulLeft(usize),
 }
 
 fn count_matches(chr: char, lexer: &mut Lexer) -> usize {
@@ -102,7 +105,7 @@ fn sum_chain<'a, I>(ops: &mut I) -> (isize, usize)
             let res = sum_chain(ops);
             (res.0 - *num as isize, res.1 + 1)
         },
-        _ => (0, 1),
+        _ => (0, 0),
     }
 }
 
@@ -115,7 +118,7 @@ fn optimization_add_sub(ops: &mut Vec<Ops>, i: usize) -> usize {
         } else if sum < 0 {
             ops[i] = Ops::Sub((-sum % 256) as u8);
         }
-        repeat(0).take(count - 1).for_each(|_| { ops.remove(i + 1); });
+        repeat(()).take(count - 1).for_each(|_| { ops.remove(i + 1); });
 
         if sum == 0 {
             ops.remove(i);
@@ -197,7 +200,7 @@ fn optimize(ops: &mut Vec<Ops>) {
         add_to_total!(sub_from_right, optimization_sub_from_right(ops, i));
         add_to_total!(sub_from_left, optimization_sub_from_left(ops, i));
     }
-    println!("optimized: removed/comnined {} add/sub commands", add_sub);
+    println!("optimized: removed/combined {} add/sub commands", add_sub);
     println!("optimized: created {} set to zero commands", set_to_zero);
     println!("optimized: created {} add to right commands", add_to_right);
     println!("optimized: created {} add to left commands", add_to_left);
@@ -223,12 +226,23 @@ fn link_jumps(ops: &mut Vec<Ops>) {
     }
 }
 
+enum TerminalType {
+    Terminal(Term),
+    Command(Bytes<Stdin>),
+}
+
 fn interpret(ops: &Vec<Ops>) {
     let mut stdout = stdout();
-    let mut stdin = stdin().bytes();
+    let stdin = stdin();
+    let mut stdin: TerminalType = if stdin.is_terminal() {
+        TerminalType::Terminal(Term::stdout())
+    } else {
+        TerminalType::Command(stdin.bytes())
+    };
     let mut instruction: usize = 0;
     let mut head: usize = 0;
     let mut memory: VecDeque<u8> = VecDeque::new();
+    let mut executed: u64 = 0;
     memory.push_back(0);
 
     while instruction < ops.len() {
@@ -241,7 +255,7 @@ fn interpret(ops: &Vec<Ops>) {
                 if new_index < 0 {
                     let size = new_index.abs() as usize;
                     memory.reserve(size);
-                    repeat(0).take(size).for_each(|_| memory.push_front(0));
+                    repeat(()).take(size).for_each(|_| memory.push_front(0));
                     head = 0;
                 } else {
                     head = new_index as usize;
@@ -252,15 +266,23 @@ fn interpret(ops: &Vec<Ops>) {
                 if head >= memory.len() {
                     let loops = head - memory.len() + 1;
                     memory.reserve(loops);
-                    repeat(0).take(loops).for_each(|_| memory.push_back(0));
+                    repeat(()).take(loops).for_each(|_| memory.push_back(0));
                 }
             },
-            Ops::Read(num) => {
-                let _ = stdout.flush();
-                memory[head] = stdin
-                    .nth(num - 1)
-                    .expect("No input")
-                    .expect("Error reading input");
+            Ops::Read(num) => match stdin {
+                TerminalType::Terminal(ref mut term) => {
+                    let _ = stdout.flush();
+                    for _ in 0..*num {
+                        let input = term.read_char().expect("choose wrong input");
+                        print!("{}", input);
+                        let _ = stdout.flush();
+                        memory[head] = input as u8;
+                    }
+                },
+                TerminalType::Command(ref mut stdin) => 
+                    memory[head] = stdin.nth(num - 1)
+                        .expect("No input")
+                        .expect("Error reading input"),
             },
             Ops::Write(num) => {
                 let text = repeat(memory[head] as char)
@@ -289,7 +311,7 @@ fn interpret(ops: &Vec<Ops>) {
                     memory.push_front(0);
                     head = 1;
                 }
-                memory[head - 1] = memory[head + 1].wrapping_add(val);
+                memory[head - 1] = memory[head - 1].wrapping_add(val);
                 memory[head] = 0;
             },
             Ops::SubFromRight => {
@@ -306,17 +328,20 @@ fn interpret(ops: &Vec<Ops>) {
                     memory.push_front(0);
                     head = 1;
                 }
-                memory[head - 1] = memory[head + 1].wrapping_sub(val);
+                memory[head - 1] = memory[head - 1].wrapping_sub(val);
                 memory[head] = 0;
             },
         }
         instruction += 1;
+        executed += 1;
     }
+    println!("\nexecuted {} instructions", executed);
+    println!("the program has {} commands", ops.len());
 }
 
 fn main() {
     let mut ops = parse_code();
-    optimize(&mut ops);
+    //optimize(&mut ops);
     link_jumps(&mut ops);
     interpret(&ops);
 }
